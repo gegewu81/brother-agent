@@ -36,6 +36,9 @@ LOCAL_HOSTNAME = os.uname().nodename
 SSH_TIMEOUT = 10
 RSYNC_TIMEOUT = 120
 
+# Watch state file: tracks last known reachability per brother
+WATCH_STATE_FILE = BROTHERS_DIR / "watch_state.json"
+
 # ── Helpers ────────────────────────────────────────────────────
 
 def log(msg: str, level: str = "INFO"):
@@ -428,6 +431,67 @@ def cmd_remove(args):
     print(f"Brother '{name}' removed.")
 
 
+# ── Watch (edge-triggered auto-sync) ───────────────────────────
+
+def load_watch_state() -> dict:
+    """Load watch state: {name: {"reachable": bool, "changed_at": iso}}"""
+    if WATCH_STATE_FILE.exists():
+        try:
+            with open(WATCH_STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_watch_state(state: dict):
+    """Persist watch state."""
+    BROTHERS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = WATCH_STATE_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    tmp.replace(WATCH_STATE_FILE)  # atomic
+
+
+def cmd_watch(args):
+    """Edge-triggered watch: sync only on unreachable→reachable transition.
+
+    Designed for cron. Outputs nothing unless a sync is triggered.
+    """
+    data = load_nodes()
+    nodes = data.get("nodes", {})
+    if not nodes:
+        return
+
+    watch_state = load_watch_state()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state_changed = False
+
+    for name, node in nodes.items():
+        host = node["host"]
+        prev = watch_state.get(name, {})
+        was_reachable = prev.get("reachable", False)
+        is_reachable = ssh_reachable(host)
+
+        if is_reachable and not was_reachable:
+            # Rising edge: brother just came online
+            log(f"MEET detected: {name} ({host}) came online, syncing...")
+            _sync_one(name)
+            state_changed = True
+
+        # Update state
+        new_entry = {"reachable": is_reachable, "changed_at": now_iso}
+        if is_reachable != was_reachable:
+            watch_state[name] = new_entry
+            state_changed = True
+        elif name not in watch_state:
+            watch_state[name] = new_entry
+            state_changed = True
+
+    if state_changed:
+        save_watch_state(watch_state)
+
+
 # ── CLI ────────────────────────────────────────────────────────
 
 def main():
@@ -461,6 +525,9 @@ def main():
     p = sub.add_parser("remove", help="Remove a brother registration")
     p.add_argument("name", help="Brother name to remove")
 
+    # watch
+    sub.add_parser("watch", help="Edge-triggered auto-sync (for cron)")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -472,6 +539,7 @@ def main():
         "status": cmd_status,
         "list": cmd_list,
         "remove": cmd_remove,
+        "watch": cmd_watch,
     }
 
     try:
