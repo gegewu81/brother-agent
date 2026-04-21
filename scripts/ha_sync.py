@@ -276,9 +276,10 @@ def _sync_one(name: str):
         except Exception as e:
             log(f"Memory snapshot push failed: {e}", "ERROR")
 
-    # MEMORY.md / USER.md
+    # MEMORY.md / USER.md (upgraded to memories/ subdir)
+    memories_dir = HERMES_DIR / "memories"
     for f in ["MEMORY.md", "USER.md"]:
-        src = HERMES_DIR / f
+        src = memories_dir / f if (memories_dir / f).exists() else HERMES_DIR / f
         if src.exists():
             rsync_push(str(src), host, f"{remote_brother_dir}/{f}")
 
@@ -308,12 +309,16 @@ def _sync_one(name: str):
                    str(local_brother / "memory_store.db"))
         ssh_cmd(host, f"rm -f {remote_tmp}", timeout=SSH_TIMEOUT)
 
-    # MEMORY.md / USER.md
+    # MEMORY.md / USER.md (upgraded to memories/ subdir)
     for f in ["MEMORY.md", "USER.md"]:
-        r = ssh_cmd(host, f"test -f {remote_hermes}/{f} && echo exists || echo missing",
-                    timeout=SSH_TIMEOUT)
-        if "exists" in r.stdout:
-            rsync_pull(host, f"{remote_hermes}/{f}", str(local_brother / f))
+        # check new path first (memories/), fallback to old path (hermes root)
+        for sub in ["memories", "."]:
+            remote_path = f"{remote_hermes}/{sub}/{f}"
+            r = ssh_cmd(host, f"test -f {remote_path} && echo exists || echo missing",
+                        timeout=SSH_TIMEOUT)
+            if "exists" in r.stdout:
+                rsync_pull(host, remote_path, str(local_brother / f))
+                break
 
     # skills
     print("  [5/5] Pulling skills...")
